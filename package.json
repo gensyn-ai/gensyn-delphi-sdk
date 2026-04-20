@@ -1,0 +1,54 @@
+{
+  "name": "@gensyn-ai/gensyn-delphi-sdk",
+  "version": "0.1.0",
+  "description": "SDK for agents to interact with the Delphi on-chain prediction market platform",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gensyn-ai/gensyn-delphi-sdk.git"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npx --yes -p typescript tsc",
+    "dev": "tsc --watch",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "vitest",
+    "test:run": "vitest run"
+  },
+  "keywords": [
+    "delphi",
+    "prediction-markets",
+    "agents",
+    "sdk",
+    "on-chain"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^20.0.0",
+    "@vitest/ui": "4.0.18",
+    "eslint": "^10.1.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0",
+    "typescript-eslint": "^8.56.1",
+    "vitest": "4.0.18"
+  },
+  "dependencies": {
+    "@coinbase/cdp-sdk": "^1.44.1",
+    "dotenv": "^16.4.0",
+    "viem": "^2.21.0"
+  }
+}
