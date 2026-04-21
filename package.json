@@ -6,6 +6,10 @@
     "type": "git",
     "url": "https://github.com/gensyn-ai/gensyn-delphi-sdk.git"
   },
+  "bugs": {
+    "url": "https://security.delphi.fyi",
+    "email": "security@gensyn.ai"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
