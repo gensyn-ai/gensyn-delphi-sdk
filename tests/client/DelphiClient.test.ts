@@ -145,6 +145,243 @@ describe("DelphiClient", () => {
   });
 });
 
+// ─── pricesAndImpliedProbabilities Tests ─────────────────────────────────────
+
+describe("DelphiClient – pricesAndImpliedProbabilities", () => {
+  const API_BASE = "https://api.example.com";
+  const API_KEY = "test-api-key";
+  const GATEWAY = "0x7b8FDBD187B0Be5e30e48B1995df574A62667147" as const;
+
+  const makeMarket = (id: string, outcomes: string[] = ["Yes", "No"]) => ({
+    id,
+    appMarketId: `uuid-${id}`,
+    status: "active",
+    category: "crypto",
+    deployer: "0xdeployer",
+    implementation: "",
+    metadataUri: "",
+    metadataUriContentHash: "",
+    metadata: { question: "Test?", outcomes },
+    dataSources: null,
+    createdAt: "2024-01-01T00:00:00Z",
+    fetchedAt: null,
+    fetchResponseStatus: null,
+    resolvesAt: null,
+    settledAt: null,
+    settlesAt: null,
+    winningOutcomeIdx: null,
+    tradingFee: null,
+    proof: null,
+    error: null,
+    verifiable: false,
+  });
+
+  let client: DelphiClient;
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let multicallSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    delete process.env.DELPHI_API_BASE_URL;
+    delete process.env.DELPHI_API_ACCESS_KEY;
+    process.env.DELPHI_API_BASE_URL = API_BASE;
+    process.env.DELPHI_API_ACCESS_KEY = API_KEY;
+
+    client = new DelphiClient({
+      apiBaseUrl: API_BASE,
+      apiKey: API_KEY,
+      gatewayAddress: GATEWAY,
+    });
+
+    multicallSpy = vi.fn();
+    vi.spyOn(client, "getSigner").mockResolvedValue({
+      address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" as `0x${string}`,
+      publicClient: { multicall: multicallSpy } as any,
+      walletClient: {} as any,
+      sendTransaction: vi.fn(),
+    } as any);
+
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // ── listMarkets ──────────────────────────────────────────────────────────────
+
+  it("listMarkets() without flag does not call multicall", async () => {
+    const market = makeMarket("0x0000000000000000000000000000000000000001");
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({ markets: [market] }), { status: 200 }));
+
+    await client.listMarkets();
+
+    expect(multicallSpy).not.toHaveBeenCalled();
+  });
+
+  it("listMarkets({ pricesAndImpliedProbabilities: false }) does not call multicall", async () => {
+    const market = makeMarket("0x0000000000000000000000000000000000000001");
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({ markets: [market] }), { status: 200 }));
+
+    await client.listMarkets({ pricesAndImpliedProbabilities: false });
+
+    expect(multicallSpy).not.toHaveBeenCalled();
+  });
+
+  it("listMarkets({ pricesAndImpliedProbabilities: true }) issues one multicall: decimals + 2 contracts per market", async () => {
+    const id = "0x0000000000000000000000000000000000000001";
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({ markets: [makeMarket(id)] }), { status: 200 }));
+
+    multicallSpy.mockResolvedValueOnce([
+      { status: "success", result: 18 },                                          // decimals()
+      { status: "success", result: [500000000000000000n, 500000000000000000n] },  // spotPrices
+      { status: "success", result: [500000000000000000n, 500000000000000000n] },  // spotImpliedProbabilities
+    ]);
+
+    await client.listMarkets({ pricesAndImpliedProbabilities: true });
+
+    expect(multicallSpy).toHaveBeenCalledOnce();
+    const { contracts } = multicallSpy.mock.calls[0][0];
+    // 1 decimals() + 2 price calls for 1 market = 3 total
+    expect(contracts).toHaveLength(3);
+    expect(contracts[0].functionName).toBe("decimals");
+    expect(contracts[1].functionName).toBe("spotPrices");
+    expect(contracts[1].args).toEqual([id, [0n, 1n]]);
+    expect(contracts[2].functionName).toBe("spotImpliedProbabilities");
+    expect(contracts[2].args).toEqual([id, [0n, 1n]]);
+  });
+
+  it("listMarkets() merges decimal-adjusted spotPrices and spotImpliedProbabilities onto each market", async () => {
+    const id = "0x0000000000000000000000000000000000000001";
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({ markets: [makeMarket(id)] }), { status: 200 }));
+
+    multicallSpy.mockResolvedValueOnce([
+      { status: "success", result: 18 },
+      { status: "success", result: [600000000000000000n, 400000000000000000n] },
+      { status: "success", result: [600000000000000000n, 400000000000000000n] },
+    ]);
+
+    const result = await client.listMarkets({ pricesAndImpliedProbabilities: true });
+
+    expect(result.markets?.[0]).toMatchObject({
+      id,
+      spotPrices: [0.6, 0.4],
+      spotImpliedProbabilities: [0.6, 0.4],
+    });
+  });
+
+  it("listMarkets() batches all markets in a single multicall", async () => {
+    const id1 = "0x0000000000000000000000000000000000000001";
+    const id2 = "0x0000000000000000000000000000000000000002";
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ markets: [makeMarket(id1), makeMarket(id2, ["A", "B", "C"])] }), { status: 200 }),
+    );
+
+    multicallSpy.mockResolvedValueOnce([
+      { status: "success", result: 18 },                                                                  // decimals()
+      { status: "success", result: [500000000000000000n, 500000000000000000n] },                          // id1 spotPrices
+      { status: "success", result: [500000000000000000n, 500000000000000000n] },                          // id1 spotImpliedProbabilities
+      { status: "success", result: [333000000000000000n, 333000000000000000n, 334000000000000000n] },     // id2 spotPrices
+      { status: "success", result: [333000000000000000n, 333000000000000000n, 334000000000000000n] },     // id2 spotImpliedProbabilities
+    ]);
+
+    await client.listMarkets({ pricesAndImpliedProbabilities: true });
+
+    expect(multicallSpy).toHaveBeenCalledOnce();
+    const { contracts } = multicallSpy.mock.calls[0][0];
+    // 1 decimals() + 2 markets × 2 price calls = 5 total
+    expect(contracts).toHaveLength(5);
+    expect(contracts[1].args).toEqual([id1, [0n, 1n]]);
+    expect(contracts[3].args).toEqual([id2, [0n, 1n, 2n]]);
+  });
+
+  it("listMarkets() returns empty arrays for a market without metadata outcomes", async () => {
+    const id = "0x0000000000000000000000000000000000000001";
+    const market = { ...makeMarket(id), metadata: null };
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({ markets: [market] }), { status: 200 }));
+
+    const result = await client.listMarkets({ pricesAndImpliedProbabilities: true });
+
+    expect(multicallSpy).not.toHaveBeenCalled();
+    expect(result.markets?.[0]).toMatchObject({ id, spotPrices: [], spotImpliedProbabilities: [] });
+  });
+
+  it("listMarkets() returns empty arrays when multicall price calls fail for a market", async () => {
+    const id = "0x0000000000000000000000000000000000000001";
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({ markets: [makeMarket(id)] }), { status: 200 }));
+
+    multicallSpy.mockResolvedValueOnce([
+      { status: "success", result: 18 },
+      { status: "failure", error: new Error("revert") },
+      { status: "failure", error: new Error("revert") },
+    ]);
+
+    const result = await client.listMarkets({ pricesAndImpliedProbabilities: true });
+
+    expect(result.markets?.[0]).toMatchObject({ id, spotPrices: [], spotImpliedProbabilities: [] });
+  });
+
+  it("listMarkets() with empty markets list does not call multicall", async () => {
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({ markets: [] }), { status: 200 }));
+
+    await client.listMarkets({ pricesAndImpliedProbabilities: true });
+
+    expect(multicallSpy).not.toHaveBeenCalled();
+  });
+
+  // ── getMarket ────────────────────────────────────────────────────────────────
+
+  it("getMarket() without flag does not call multicall", async () => {
+    const id = "0x0000000000000000000000000000000000000001";
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(makeMarket(id)), { status: 200 }));
+
+    await client.getMarket({ id });
+
+    expect(multicallSpy).not.toHaveBeenCalled();
+  });
+
+  it("getMarket({ pricesAndImpliedProbabilities: true }) calls multicall and merges decimal-adjusted prices", async () => {
+    const id = "0x0000000000000000000000000000000000000001";
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(makeMarket(id)), { status: 200 }));
+
+    multicallSpy.mockResolvedValueOnce([
+      { status: "success", result: 18 },
+      { status: "success", result: [700000000000000000n, 300000000000000000n] },
+      { status: "success", result: [700000000000000000n, 300000000000000000n] },
+    ]);
+
+    const result = await client.getMarket({ id, pricesAndImpliedProbabilities: true });
+
+    expect(multicallSpy).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ id, spotPrices: [0.7, 0.3], spotImpliedProbabilities: [0.7, 0.3] });
+  });
+
+  it("getMarket() returns empty arrays when market has no metadata outcomes", async () => {
+    const id = "0x0000000000000000000000000000000000000001";
+    const market = { ...makeMarket(id), metadata: null };
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(market), { status: 200 }));
+
+    const result = await client.getMarket({ id, pricesAndImpliedProbabilities: true });
+
+    expect(multicallSpy).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ id, spotPrices: [], spotImpliedProbabilities: [] });
+  });
+
+  it("getMarket() returns empty arrays when multicall fails", async () => {
+    const id = "0x0000000000000000000000000000000000000001";
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(makeMarket(id)), { status: 200 }));
+
+    multicallSpy.mockResolvedValueOnce([
+      { status: "success", result: 18 },
+      { status: "failure", error: new Error("revert") },
+      { status: "failure", error: new Error("revert") },
+    ]);
+
+    const result = await client.getMarket({ id, pricesAndImpliedProbabilities: true });
+
+    expect(result).toMatchObject({ id, spotPrices: [], spotImpliedProbabilities: [] });
+  });
+});
+
 // ─── Read API Tests ──────────────────────────────────────────────────────────
 
 describe("DelphiClient – Read APIs", () => {
@@ -204,14 +441,16 @@ describe("DelphiClient – Read APIs", () => {
   // ── listMarkets ──────────────────────────────────────────────────────────────
 
   it("listMarkets() should GET /markets with default params", async () => {
-    const body = { markets: [{ id: "m1", status: "active" }] };
+    const body = { markets: [{ id: "m1", appMarketId: "uuid-1234", status: "active" }] };
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify(body), { status: 200 }),
     );
 
     const result = await client.listMarkets();
 
-    expect(result).toEqual(body);
+    expect(result).toEqual({
+      markets: [{ ...body.markets[0], marketUrl: "https://testnet.delphi.fyi/market/uuid-1234" }],
+    });
     const [url, init] = fetchSpy.mock.calls[0] as [unknown, any];
     expect(url).toContain("/markets");
     expect((init?.headers as Record<string, string>)["X-API-Key"]).toBe(API_KEY);
@@ -245,6 +484,18 @@ describe("DelphiClient – Read APIs", () => {
     expect(parsed.searchParams.get("verifiable")).toBe("true");
   });
 
+  it("listMarkets() should pass orderBy=settles_at", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ markets: [] }), { status: 200 }),
+    );
+
+    await client.listMarkets({ orderBy: "settles_at" });
+
+    const [url] = fetchSpy.mock.calls[0];
+    const parsed = new URL(url as string);
+    expect(parsed.searchParams.get("orderBy")).toBe("settles_at");
+  });
+
   it("listMarkets() should omit undefined optional params from query string", async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify({ markets: null }), { status: 200 }),
@@ -265,14 +516,14 @@ describe("DelphiClient – Read APIs", () => {
   // ── getMarket ────────────────────────────────────────────────────────────────
 
   it("getMarket() should GET /markets/:id", async () => {
-    const market = { id: "abc-123", status: "active", deployer: "0xabc" };
+    const market = { id: "abc-123", appMarketId: "uuid-abc-123", status: "active", deployer: "0xabc" };
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify(market), { status: 200 }),
     );
 
     const result = await client.getMarket({ id: "abc-123" });
 
-    expect(result).toEqual(market);
+    expect(result).toEqual({ ...market, marketUrl: "https://testnet.delphi.fyi/market/uuid-abc-123" });
     const [url] = fetchSpy.mock.calls[0];
     expect(url).toContain("/markets/abc-123");
   });

@@ -63,6 +63,7 @@ An API key is required for all REST API endpoints (listing markets, querying pos
 | `DELPHI_GATEWAY_CONTRACT` | Override the Gateway contract address | *(network default)* |
 | `DELPHI_TOKEN_ADDRESS` | Override the ERC-20 token (USDC) address | *(network default)* |
 | `DELPHI_SUBGRAPH_URL` | Override the Goldsky subgraph endpoint | *(network default)* |
+| `DELPHI_APP_URL` | Override the Delphi app base URL (used to build `marketUrl`) | *(network default)* |
 | `GENSYN_RPC_URL` | Override the JSON-RPC endpoint | *(network default)* |
 | `GENSYN_CHAIN_ID` | Override the chain ID | *(network default)* |
 
@@ -91,6 +92,7 @@ An API key is required for all REST API endpoints (listing markets, querying pos
 | Token (USDC) | `0x0724D6079b986F8e44bDafB8a09B60C0bd6A45a1` | `0x5b32c997211621d55a89Cc5abAF1cC21F3A6ddF5` |
 | API URL | `https://delphi-api.gensyn.ai/` | `https://api.delphi.fyi/` |
 | Subgraph URL | [Goldsky endpoint](https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-testnet/1.0.0/gn) | [Goldsky endpoint](https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-mainnet/1.0.0/gn) |
+| App URL | `https://testnet.delphi.fyi` | `https://app.delphi.fyi` |
 
 ### Config Object
 
@@ -197,11 +199,17 @@ const { status } = await client.health();
 
 Retrieve markets with optional filtering, sorting, and pagination.
 
+Each market object includes:
+- `id` — on-chain contract address of the market proxy
+- `appMarketId` — UUID identifying the market in the Delphi app UI
+- `marketUrl` — direct link to the market on the Delphi app (`{appUrl}/market/{appMarketId}`)
+- `deployer` — wallet address of the market creator
+
 ```typescript
 const { markets } = await client.listMarkets({
   status: "open",         // "open" | "closed" | "settled"
   category: "crypto",     // "crypto" | "culture" | "economics" | "miscellaneous" | "politics" | "sports"
-  orderBy: "liquidity",   // "liquidity" (default) | "created"
+  orderBy: "liquidity",   // "liquidity" (default) | "created" | "settles_at"
   verifiable: true,       // filter by verifiable settlement
   skip: 0,
   limit: 50,
@@ -210,10 +218,10 @@ const { markets } = await client.listMarkets({
 
 #### `getMarket(params)`
 
-Retrieve a single market by ID.
+Retrieve a single market by its on-chain contract address.
 
 ```typescript
-const market = await client.getMarket({ id: "market-id" });
+const market = await client.getMarket({ id: "0xMarketContractAddress" });
 ```
 
 #### `listPositions(params)`
