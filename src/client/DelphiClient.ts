@@ -23,6 +23,7 @@ import type {
   LiquidateParams,
   LiquidateResponse,
   HealthResponse,
+  Market,
   ListMarketsParams,
   ListMarketsResponse,
   GetMarketParams,
@@ -40,9 +41,16 @@ import { WalletClient } from "./wallet.js";
 import { SubgraphClient } from "./subgraph.js";
 import type { Abi } from "viem";
 import { ABI as DYNAMIC_PARIMUTUEL_GATEWAY_ABI } from "../abi/DynamicParimutuelGateway.js";
+import { ABI as ERC20_ABI } from "../abi/ERC20.js";
 import { config as dotenvConfig } from "dotenv";
 
 dotenvConfig();
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function ensureHexPrefix(value: string): string {
+  return value.startsWith("0x") ? value : `0x${value}`;
+}
 
 // ─── Network Defaults ─────────────────────────────────────────────────────────
 
@@ -55,6 +63,7 @@ const NETWORK_DEFAULTS: Record<Network, Partial<DelphiClientConfig>> = {
     apiBaseUrl: "https://delphi-api.gensyn.ai/",
     subgraphUrl:
       "https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-testnet/1.0.0/gn",
+    delphiAppUrl: "https://testnet.delphi.fyi"
   },
   mainnet: {
     rpcUrl: "https://gensyn-mainnet.g.alchemy.com/public",
@@ -64,6 +73,7 @@ const NETWORK_DEFAULTS: Record<Network, Partial<DelphiClientConfig>> = {
     apiBaseUrl: "https://api.delphi.fyi/",
     subgraphUrl:
       "https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-mainnet/1.0.0/gn",
+    delphiAppUrl: "https://app.delphi.fyi"
   },
 };
 
@@ -112,6 +122,9 @@ export class DelphiClient {
   // Subgraph config
   private readonly subgraphUrl?: string;
 
+  // Delphi app URL
+  private readonly delphiAppUrl?: string;
+
   private signerPromise: Promise<DelphiSigner> | null = null;
   private tokenClient: TokenClient | null = null;
   private walletClient: WalletClient | null = null;
@@ -128,14 +141,20 @@ export class DelphiClient {
 
     // Private-key config (user must provide)
     const envPrivateKey = process.env.WALLET_PRIVATE_KEY;
-    this.privateKey = config?.privateKey ?? (envPrivateKey ? (envPrivateKey as `0x${string}`) : undefined);
+    const rawPrivateKey = config?.privateKey ?? envPrivateKey;
+    this.privateKey = rawPrivateKey
+      ? (ensureHexPrefix(rawPrivateKey) as `0x${string}`)
+      : undefined;
 
     // CDP config (user must provide)
     this.cdpApiKeyId = config?.cdpApiKeyId ?? process.env.CDP_API_KEY_ID;
     this.cdpApiKeySecret = config?.cdpApiKeySecret ?? process.env.CDP_API_KEY_SECRET;
     this.cdpWalletSecret = config?.cdpWalletSecret ?? process.env.CDP_WALLET_SECRET;
     const envCdpWalletAddress = process.env.CDP_WALLET_ADDRESS;
-    this.cdpWalletAddress = config?.cdpWalletAddress ?? (envCdpWalletAddress ? (envCdpWalletAddress as `0x${string}`) : undefined);
+    const rawCdpWalletAddress = config?.cdpWalletAddress ?? envCdpWalletAddress;
+    this.cdpWalletAddress = rawCdpWalletAddress
+      ? (ensureHexPrefix(rawCdpWalletAddress) as `0x${string}`)
+      : undefined;
 
     // Chain config (use network defaults, allow env/config override)
     this.rpcUrl = config?.rpcUrl ?? process.env.GENSYN_RPC_URL ?? networkDefaults.rpcUrl;
@@ -154,6 +173,9 @@ export class DelphiClient {
 
     // Subgraph URL (use network defaults, allow env/config override)
     this.subgraphUrl = config?.subgraphUrl ?? process.env.DELPHI_SUBGRAPH_URL ?? networkDefaults.subgraphUrl;
+
+    // Delphi app URL (use network defaults, allow env/config override)
+    this.delphiAppUrl = config?.delphiAppUrl ?? process.env.DELPHI_APP_URL ?? networkDefaults.delphiAppUrl;
 
     // Extra headers (e.g. Cloudflare Access)
     this.extraHeaders = config?.extraHeaders ?? {};
@@ -489,6 +511,17 @@ export class DelphiClient {
 
   // ─── REST API Helpers ───────────────────────────────────────────────────────
 
+  private getDelphiAppUrl(): string {
+    if (!this.delphiAppUrl) {
+      throw new Error("Requires delphiAppUrl. Set DELPHI_APP_URL environment variable.");
+    }
+    return this.delphiAppUrl.replace(/\/+$/, ""); // strip trailing slash
+  }
+
+  private buildMarketUrl(appMarketId: string): string {
+    return `${this.getDelphiAppUrl()}/market/${appMarketId}`;
+  }
+
   private getApiBaseUrl(): string {
     if (!this.apiBaseUrl) {
       throw new Error("Requires apiBaseUrl. Set DELPHI_API_BASE_URL environment variable.");
@@ -558,10 +591,81 @@ export class DelphiClient {
   }
 
   /**
+   * Fetches on-chain spot prices and implied probabilities for a batch of markets
+   * using a single multicall (includes token decimals lookup).
+   * Outcome counts are derived from market metadata.
+   * Returns human-readable floats: spot prices decimal-adjusted by the token,
+   * implied probabilities as values between 0 and 1.
+   */
+  private async fetchPricesForMarkets(
+    markets: Market[],
+  ): Promise<Map<string, { spotPrices: number[]; spotImpliedProbabilities: number[] }>> {
+    const result = new Map<string, { spotPrices: number[]; spotImpliedProbabilities: number[] }>();
+    if (markets.length === 0) return result;
+
+    const gatewayAddress = this.getGatewayAddress();
+    const tokenAddress = this.getTokenAddress();
+    const { publicClient } = await this.getSigner();
+    const gatewayAbi = DYNAMIC_PARIMUTUEL_GATEWAY_ABI as Abi;
+    const erc20Abi = ERC20_ABI as Abi;
+
+    // Accumulate spotPrices + spotImpliedProbabilities contracts per market.
+    // Slot indices below are relative to the price contracts array (before prepending decimals).
+    const priceContracts: { address: `0x${string}`; abi: Abi; functionName: string; args: unknown[] }[] = [];
+    const marketPriceSlots: { marketId: string; slotPrices: number; slotProbs: number }[] = [];
+
+    for (const m of markets) {
+      const n = m.metadata?.outcomes?.length ?? 0;
+      if (n === 0) {
+        result.set(m.id, { spotPrices: [], spotImpliedProbabilities: [] });
+        continue;
+      }
+      const indices = Array.from({ length: n }, (_, j) => BigInt(j));
+      marketPriceSlots.push({
+        marketId: m.id,
+        slotPrices: priceContracts.length,
+        slotProbs: priceContracts.length + 1,
+      });
+      priceContracts.push(
+        { address: gatewayAddress, abi: gatewayAbi, functionName: "spotPrices", args: [m.id as `0x${string}`, indices] },
+        { address: gatewayAddress, abi: gatewayAbi, functionName: "spotImpliedProbabilities", args: [m.id as `0x${string}`, indices] },
+      );
+    }
+
+    if (priceContracts.length === 0) return result;
+
+    // Prepend a decimals() call so everything lands in one multicall.
+    const decimalsContract = { address: tokenAddress, abi: erc20Abi, functionName: "decimals", args: [] };
+    const allResults = await publicClient.multicall({
+      contracts: [decimalsContract, ...priceContracts],
+      allowFailure: true,
+    });
+
+    const tokenDecimals = allResults[0].status === "success" ? Number(allResults[0].result as number) : 18;
+    const priceResults = allResults.slice(1);
+
+    for (const { marketId, slotPrices, slotProbs } of marketPriceSlots) {
+      const pr = priceResults[slotPrices];
+      const probr = priceResults[slotProbs];
+      const divisorPrice = 10 ** tokenDecimals;
+      result.set(marketId, {
+        spotPrices: pr?.status === "success"
+          ? (pr.result as bigint[]).map((v) => Number(v) / divisorPrice)
+          : [],
+        spotImpliedProbabilities: probr?.status === "success"
+          ? (probr.result as bigint[]).map((v) => Number(v) / 1e18)
+          : [],
+      });
+    }
+
+    return result;
+  }
+
+  /**
    * Retrieve markets with pagination and optional filters.
    */
   async listMarkets(params: ListMarketsParams = {}): Promise<ListMarketsResponse> {
-    return this.apiGet<ListMarketsResponse>("/markets", {
+    const response = await this.apiGet<ListMarketsResponse>("/markets", {
       skip: params.skip,
       limit: params.limit,
       orderBy: params.orderBy,
@@ -569,13 +673,37 @@ export class DelphiClient {
       category: params.category,
       verifiable: params.verifiable,
     });
+
+    const markets = response.markets?.map((m) => ({ ...m, marketUrl: this.buildMarketUrl(m.appMarketId) })) ?? null;
+
+    if (params.pricesAndImpliedProbabilities && markets && markets.length > 0) {
+      const priceMap = await this.fetchPricesForMarkets(markets);
+      return {
+        ...response,
+        markets: markets.map((m) => {
+          const prices = priceMap.get(m.id);
+          return prices ? { ...m, ...prices } : m;
+        }),
+      };
+    }
+
+    return { ...response, markets };
   }
 
   /**
    * Retrieve a single market by ID.
    */
   async getMarket(params: GetMarketParams): Promise<GetMarketResponse> {
-    return this.apiGet<GetMarketResponse>(`/markets/${encodeURIComponent(params.id)}`);
+    const market = await this.apiGet<GetMarketResponse>(`/markets/${encodeURIComponent(params.id)}`);
+    const enriched = { ...market, marketUrl: this.buildMarketUrl(market.appMarketId) };
+
+    if (params.pricesAndImpliedProbabilities) {
+      const priceMap = await this.fetchPricesForMarkets([enriched]);
+      const prices = priceMap.get(enriched.id);
+      if (prices) return { ...enriched, ...prices };
+    }
+
+    return enriched;
   }
 
   /**

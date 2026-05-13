@@ -154,15 +154,36 @@ export interface EnsureTokenApprovalResponse {
 
 // ─── REST API: Market ─────────────────────────────────────────────────────────
 
+export interface MarketMetadata {
+  question: string;
+  outcomes: string[];
+  model?: {
+    model_identifier?: string;
+    prompt_context?: string;
+  };
+  initial_liquidity?: string;
+  initial_pool?: string;
+  refund?: string;
+  market_creation_fee?: string;
+  version?: string;
+  [key: string]: unknown;
+}
+
 export interface Market {
+  /** On-chain contract address of the market proxy */
   id: string;
+  /** UUID identifying the market in the Delphi app UI */
+  appMarketId: string;
+  /** Direct link to the market on the Delphi app */
+  marketUrl: string;
   status: string;
   category: string;
+  /** Wallet address of the market creator */
   deployer: string;
   implementation: string;
   metadataUri: string;
   metadataUriContentHash: string;
-  metadata: unknown;
+  metadata: MarketMetadata | null;
   dataSources: unknown;
   createdAt: string;
   fetchedAt: string | null;
@@ -175,6 +196,10 @@ export interface Market {
   proof: string | null;
   error: string | null;
   verifiable: boolean;
+  /** Spot price per outcome, decimal-adjusted to a human-readable float. Only present when pricesAndImpliedProbabilities is requested. */
+  spotPrices?: number[];
+  /** Implied probability per outcome as a value between 0 and 1. Only present when pricesAndImpliedProbabilities is requested. */
+  spotImpliedProbabilities?: number[];
 }
 
 export interface ListMarketsParams {
@@ -182,7 +207,7 @@ export interface ListMarketsParams {
   skip?: number;
   /** Max number of records to return (default 50) */
   limit?: number;
-  /** Sort: "liquidity" (default, volume + initial liquidity) or "created" (newest first) */
+  /** Sort order: "liquidity" (default, volume + initial liquidity) | "created" (newest first) | "settles_at" (earliest settlement first) */
   orderBy?: string;
   /** Filter by market status */
   status?: string;
@@ -190,6 +215,8 @@ export interface ListMarketsParams {
   category?: string;
   /** Filter by verifiable settlement */
   verifiable?: boolean;
+  /** When true, fetches on-chain spot prices and implied probabilities for each market's outcomes via multicall (default false) */
+  pricesAndImpliedProbabilities?: boolean;
 }
 
 export interface ListMarketsResponse {
@@ -199,6 +226,8 @@ export interface ListMarketsResponse {
 export interface GetMarketParams {
   /** Market ID */
   id: string;
+  /** When true, fetches on-chain spot prices and implied probabilities for the market's outcomes (default false) */
+  pricesAndImpliedProbabilities?: boolean;
 }
 
 export type GetMarketResponse = Market;
@@ -312,4 +341,8 @@ export interface DelphiClientConfig {
   // ── Subgraph (Goldsky) config ─────────────────────────────────────────────
   /** Goldsky subgraph GraphQL endpoint. Falls back to DELPHI_SUBGRAPH_URL env var, then network default. */
   subgraphUrl?: string;
+
+  // ── Delphi App URL ─────────────────────────────────────────────────────────
+  /** URL of the Delphi app. Falls back to DELPHI_APP_URL env var, then network default. */
+  delphiAppUrl?: string;
 }

@@ -43,6 +43,9 @@ function buildChain(chainId: number, rpcUrl: string): Chain {
     rpcUrls: {
       default: { http: [rpcUrl] },
     },
+    contracts: {
+      multicall3: { address: "0xcA11bde05977b3631167028862bE2a173976CA11" },
+    },
   });
 }
 
