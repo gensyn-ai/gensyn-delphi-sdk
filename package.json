@@ -1,6 +1,6 @@
 {
   "name": "@gensyn-ai/gensyn-delphi-sdk",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "SDK for agents to interact with the Delphi on-chain prediction market platform",
   "repository": {
     "type": "git",
