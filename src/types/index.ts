@@ -56,6 +56,36 @@ export interface QuoteSellResponse {
   tokensOut: bigint;
 }
 
+export interface QuoteRedeemParams {
+  /** Settled market proxy contract address */
+  marketAddress: `0x${string}`;
+  /** Wallet to quote redemption for (defaults to the configured signer's address) */
+  account?: `0x${string}`;
+}
+
+export interface QuoteRedeemResponse {
+  /** Winning outcome shares that would be burned on redemption */
+  sharesIn: bigint;
+  /** Collateral tokens you would receive (the redemption payout) */
+  tokensOut: bigint;
+}
+
+export interface QuoteLiquidateParams {
+  /** Expired (unsettled) market proxy contract address */
+  marketAddress: `0x${string}`;
+  /** Outcome indices to quote liquidation for (0-based) */
+  outcomeIndices: number[];
+  /** Wallet to quote liquidation for (defaults to the configured signer's address) */
+  account?: `0x${string}`;
+}
+
+export interface QuoteLiquidateResponse {
+  /** Shares that would be burned per outcome index */
+  sharesIn: bigint[];
+  /** Total collateral tokens you would receive across the given outcomes */
+  totalTokensOut: bigint;
+}
+
 // ─── Redeem / Liquidate (via Gateway) ─────────────────────────────────────────
 
 export interface RedeemMarketParams {

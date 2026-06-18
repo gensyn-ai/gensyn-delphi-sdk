@@ -10,6 +10,10 @@ import type {
   QuoteBuyResponse,
   QuoteSellParams,
   QuoteSellResponse,
+  QuoteRedeemParams,
+  QuoteRedeemResponse,
+  QuoteLiquidateParams,
+  QuoteLiquidateResponse,
   GetTokenAllowanceParams,
   GetTokenAllowanceResponse,
   ApproveTokenParams,
@@ -294,6 +298,54 @@ export class DelphiClient {
     })) as bigint;
 
     return { tokensOut };
+  }
+
+  /**
+   * Quote the proceeds of redeeming winning shares in a settled market, without
+   * sending a transaction. Simulates `Gateway.redeem(marketProxy)` via eth_call
+   * (no gas) and returns the shares that would be burned and tokens received.
+   * Reverts (throws) if the market is not settled or the account holds no
+   * winning shares to redeem.
+   */
+  async quoteRedeem(params: QuoteRedeemParams): Promise<QuoteRedeemResponse> {
+    const gatewayAddress = this.getGatewayAddress();
+    const { address, publicClient } = await this.getSigner();
+
+    const { result } = await publicClient.simulateContract({
+      account: params.account ?? address,
+      address: gatewayAddress,
+      abi: DYNAMIC_PARIMUTUEL_GATEWAY_ABI as Abi,
+      functionName: "redeem",
+      args: [params.marketAddress],
+    });
+
+    const [sharesIn, tokensOut] = result as [bigint, bigint];
+    return { sharesIn, tokensOut };
+  }
+
+  /**
+   * Quote the proceeds of liquidating positions in an expired (unsettled) market,
+   * without sending a transaction. Simulates `Gateway.liquidate(marketProxy,
+   * outcomeIndices)` via eth_call (no gas) and returns the shares that would be
+   * burned per outcome and the total tokens received. Reverts (throws) if the
+   * market is not liquidatable or the account holds no shares in those outcomes.
+   */
+  async quoteLiquidate(params: QuoteLiquidateParams): Promise<QuoteLiquidateResponse> {
+    const gatewayAddress = this.getGatewayAddress();
+    const { address, publicClient } = await this.getSigner();
+
+    const outcomeIndicesBigInt = params.outcomeIndices.map((idx) => BigInt(idx));
+
+    const { result } = await publicClient.simulateContract({
+      account: params.account ?? address,
+      address: gatewayAddress,
+      abi: DYNAMIC_PARIMUTUEL_GATEWAY_ABI as Abi,
+      functionName: "liquidate",
+      args: [params.marketAddress, outcomeIndicesBigInt],
+    });
+
+    const [sharesIn, totalTokensOut] = result as [bigint[], bigint];
+    return { sharesIn, totalTokensOut };
   }
 
   // ─── Buy / Sell (on-chain via Gateway) ──────────────────────────────────────
