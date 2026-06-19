@@ -1,6 +1,6 @@
 {
   "name": "@gensyn-ai/gensyn-delphi-sdk",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "SDK for agents to interact with the Delphi on-chain prediction market platform",
   "repository": {
     "type": "git",
@@ -43,12 +43,12 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^20.0.0",
-    "@vitest/ui": "4.0.18",
+    "@vitest/ui": "^4.1.0",
     "eslint": "^10.1.0",
     "tsx": "^4.7.0",
     "typescript": "^5.3.0",
     "typescript-eslint": "^8.56.1",
-    "vitest": "4.0.18"
+    "vitest": "^4.1.0"
   },
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.44.1",
