@@ -341,6 +341,56 @@ const DYNAMIC_PARIMUTUEL_GATEWAY_ABI = [
         "internalType": "contract IDynamicParimutuelMarket",
         "name": "marketProxy",
         "type": "address"
+      }
+    ],
+    "name": "GatewayMarketFailed",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "contract IDynamicParimutuelMarket",
+        "name": "marketProxy",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "winningOutcomeIdx",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "marketCreatorReward",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "refund",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "marketCreatorTradingFeesCut",
+        "type": "uint256"
+      }
+    ],
+    "name": "GatewayMarketSettled",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "contract IDynamicParimutuelMarket",
+        "name": "marketProxy",
+        "type": "address"
       },
       {
         "indexed": true,
@@ -449,6 +499,25 @@ const DYNAMIC_PARIMUTUEL_GATEWAY_ABI = [
       }
     ],
     "name": "Initialized",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "contract IDynamicParimutuelMarket",
+        "name": "marketProxy",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "keeper",
+        "type": "address"
+      }
+    ],
+    "name": "MarketResolutionRequested",
     "type": "event"
   },
   {
@@ -698,6 +767,19 @@ const DYNAMIC_PARIMUTUEL_GATEWAY_ABI = [
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "contract IDynamicParimutuelMarket",
+        "name": "marketProxy",
+        "type": "address"
+      }
+    ],
+    "name": "failMarket",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -1252,6 +1334,19 @@ const DYNAMIC_PARIMUTUEL_GATEWAY_ABI = [
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "oracleRelayer",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "contract IDynamicParimutuelMarket",
@@ -1349,6 +1444,19 @@ const DYNAMIC_PARIMUTUEL_GATEWAY_ABI = [
         "type": "uint256"
       }
     ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "contract IDynamicParimutuelMarket",
+        "name": "marketProxy",
+        "type": "address"
+      }
+    ],
+    "name": "resolveMarket",
+    "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
   },

@@ -34,6 +34,7 @@ import type {
   GetMarketResponse,
   ListPositionsParams,
   ListPositionsResponse,
+  MarketStatus,
 } from "../types/index.js";
 import {
   createPrivateKeySigner,
@@ -45,6 +46,7 @@ import { WalletClient } from "./wallet.js";
 import { SubgraphClient } from "./subgraph.js";
 import type { Abi } from "viem";
 import { ABI as DYNAMIC_PARIMUTUEL_GATEWAY_ABI } from "../abi/DynamicParimutuelGateway.js";
+import { ABI as DELPHI_FACTORY_ABI } from "../abi/DelphiFactory.js";
 import { ABI as ERC20_ABI } from "../abi/ERC20.js";
 import { config as dotenvConfig } from "dotenv";
 
@@ -58,25 +60,48 @@ function ensureHexPrefix(value: string): string {
 
 // ─── Network Defaults ─────────────────────────────────────────────────────────
 
+/**
+ * Per-network contract defaults.
+ *
+ * Delphi runs two parallel deployments on each network. `gatewayAddress` /
+ * `factoryAddress` are the automated-settlement deployment (oracle-settled, where
+ * every new market is created); `legacyGatewayAddress` / `legacyFactoryAddress` are
+ * the original creator-settled deployment, whose factory is frozen but whose
+ * existing markets still hold redeemable positions.
+ *
+ * Each gateway only accepts markets from its own factory — passing the other
+ * deployment's market reverts with `MarketProxyNotDeployedByFactory` — so the
+ * client resolves the owning gateway per market (see `resolveGateway`).
+ *
+ * `subgraphUrl` indexes the automated-settlement gateway only. Legacy-gateway
+ * activity lives in the older `delphi-testnet`/`delphi-mainnet` subgraphs; set
+ * `subgraphUrl` explicitly to query those.
+ */
 const NETWORK_DEFAULTS: Record<Network, Partial<DelphiClientConfig>> = {
   testnet: {
     rpcUrl: "https://gensyn-testnet.g.alchemy.com/public",
     chainId: 685685,
-    gatewayAddress: "0x7b8FDBD187B0Be5e30e48B1995df574A62667147" as `0x${string}`,
+    gatewayAddress: "0x22ea355D7218Dc86b4c83732cBbd01f7Ff2332b3" as `0x${string}`,
+    factoryAddress: "0x97d2b3F0614C8189343A38094629FCE2910b727A" as `0x${string}`,
+    legacyGatewayAddress: "0x7b8FDBD187B0Be5e30e48B1995df574A62667147" as `0x${string}`,
+    legacyFactoryAddress: "0xd03CEC55802f0D44D844384E1144B25717315E5A" as `0x${string}`,
     tokenAddress: "0x0724D6079b986F8e44bDafB8a09B60C0bd6A45a1" as `0x${string}`,
     apiBaseUrl: "https://delphi-api.gensyn.ai/",
     subgraphUrl:
-      "https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-testnet/1.0.0/gn",
+      "https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-testnet-autoset/1.0.0/gn",
     delphiAppUrl: "https://testnet.delphi.fyi"
   },
   mainnet: {
     rpcUrl: "https://gensyn-mainnet.g.alchemy.com/public",
     chainId: 685689,
-    gatewayAddress: "0x4e4e85c52E0F414cc67eE88d0C649Ec81698d700" as `0x${string}`,
+    gatewayAddress: "0x982a67aE92D8de361957249fB2BB4a62BCc6A8d5" as `0x${string}`,
+    factoryAddress: "0x9C73417f79a1361c6aF9Bd828343badEE1b84936" as `0x${string}`,
+    legacyGatewayAddress: "0x4e4e85c52E0F414cc67eE88d0C649Ec81698d700" as `0x${string}`,
+    legacyFactoryAddress: "0x4596d847eA56DCf9A37944c13793Af802Fc5D1eC" as `0x${string}`,
     tokenAddress: "0x5b32c997211621d55a89Cc5abAF1cC21F3A6ddF5" as `0x${string}`,
     apiBaseUrl: "https://api.delphi.fyi/",
     subgraphUrl:
-      "https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-mainnet/1.0.0/gn",
+      "https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-mainnet-autoset/1.0.0/gn",
     delphiAppUrl: "https://app.delphi.fyi"
   },
 };
@@ -116,7 +141,13 @@ export class DelphiClient {
   private readonly rpcUrl?: string;
   private readonly chainId?: number;
   private readonly gatewayAddress?: `0x${string}`;
+  private readonly legacyGatewayAddress?: `0x${string}`;
+  private readonly factoryAddress?: `0x${string}`;
+  private readonly legacyFactoryAddress?: `0x${string}`;
   private readonly tokenAddress?: `0x${string}`;
+
+  /** Resolved gateway per market proxy (lowercased). A market never changes deployment. */
+  private readonly gatewayByMarket = new Map<string, `0x${string}`>();
 
   // REST API config
   private readonly apiBaseUrl?: string;
@@ -166,6 +197,19 @@ export class DelphiClient {
     this.chainId = config?.chainId ?? (envChainId ? Number(envChainId) : undefined) ?? networkDefaults.chainId;
     const envGateway = process.env.DELPHI_GATEWAY_CONTRACT;
     this.gatewayAddress = config?.gatewayAddress ?? (envGateway ? (envGateway as `0x${string}`) : undefined) ?? networkDefaults.gatewayAddress;
+    // An explicit gatewayAddress (config or env) pins every call to that gateway, so the
+    // legacy/automated routing addresses are only defaulted when no override was given.
+    const gatewayPinned = Boolean(config?.gatewayAddress ?? envGateway);
+    const envLegacyGateway = process.env.DELPHI_LEGACY_GATEWAY_CONTRACT;
+    this.legacyGatewayAddress = config?.legacyGatewayAddress
+      ?? (envLegacyGateway ? (envLegacyGateway as `0x${string}`) : undefined)
+      ?? (gatewayPinned ? undefined : networkDefaults.legacyGatewayAddress);
+    this.factoryAddress = config?.factoryAddress
+      ?? (process.env.DELPHI_FACTORY_CONTRACT as `0x${string}` | undefined)
+      ?? (gatewayPinned ? undefined : networkDefaults.factoryAddress);
+    this.legacyFactoryAddress = config?.legacyFactoryAddress
+      ?? (process.env.DELPHI_LEGACY_FACTORY_CONTRACT as `0x${string}` | undefined)
+      ?? (gatewayPinned ? undefined : networkDefaults.legacyFactoryAddress);
     const envTokenAddress = process.env.DELPHI_TOKEN_ADDRESS;
     this.tokenAddress = config?.tokenAddress ?? (envTokenAddress ? (envTokenAddress as `0x${string}`) : undefined) ?? networkDefaults.tokenAddress;
 
@@ -245,6 +289,89 @@ export class DelphiClient {
     return this.gatewayAddress;
   }
 
+  /**
+   * Resolves which gateway serves `marketAddress`.
+   *
+   * Delphi runs a legacy (creator-settled) and an automated-settlement deployment
+   * side by side. Each gateway rejects the other's markets with
+   * `MarketProxyNotDeployedByFactory`, so every market-scoped call has to be routed.
+   *
+   * Resolution asks both factories whether they deployed the proxy and is cached for
+   * the lifetime of the client — a market never moves between deployments. When
+   * routing is not configured (e.g. `gatewayAddress` was pinned explicitly) or
+   * neither factory claims the market, the configured `gatewayAddress` is used.
+   */
+  async resolveGateway(marketAddress: `0x${string}`): Promise<`0x${string}`> {
+    const [gateway] = await this.resolveGateways([marketAddress]);
+    return gateway;
+  }
+
+  /**
+   * Batch form of {@link resolveGateway} — resolves many markets in a single
+   * multicall (two calls: one per factory) instead of one round trip per market.
+   */
+  private async resolveGateways(
+    marketAddresses: `0x${string}`[],
+  ): Promise<`0x${string}`[]> {
+    const defaultGateway = this.getGatewayAddress();
+
+    // Routing needs both deployments' factories; without them everything goes to
+    // the configured gateway (which is also the explicit-override path).
+    if (!this.legacyGatewayAddress || !this.factoryAddress || !this.legacyFactoryAddress) {
+      return marketAddresses.map(() => defaultGateway);
+    }
+
+    const unresolved = [
+      ...new Set(
+        marketAddresses
+          .map((m) => m.toLowerCase())
+          .filter((m) => !this.gatewayByMarket.has(m)),
+      ),
+    ] as `0x${string}`[];
+
+    if (unresolved.length > 0) {
+      const { publicClient } = await this.getSigner();
+      const factoryAbi = DELPHI_FACTORY_ABI as Abi;
+
+      const [automatedResult, legacyResult] = await publicClient.multicall({
+        contracts: [
+          {
+            address: this.factoryAddress,
+            abi: factoryAbi,
+            functionName: "marketProxiesExist",
+            args: [unresolved],
+          },
+          {
+            address: this.legacyFactoryAddress,
+            abi: factoryAbi,
+            functionName: "marketProxiesExist",
+            args: [unresolved],
+          },
+        ],
+        allowFailure: true,
+      });
+
+      const inAutomated =
+        automatedResult.status === "success" ? (automatedResult.result as boolean[]) : [];
+      const inLegacy =
+        legacyResult.status === "success" ? (legacyResult.result as boolean[]) : [];
+
+      unresolved.forEach((market, i) => {
+        // Deliberately leave unclaimed markets out of the cache so a later call
+        // can retry — a failed multicall must not pin a market to the wrong gateway.
+        if (inAutomated[i]) {
+          this.gatewayByMarket.set(market, defaultGateway);
+        } else if (inLegacy[i]) {
+          this.gatewayByMarket.set(market, this.legacyGatewayAddress!);
+        }
+      });
+    }
+
+    return marketAddresses.map(
+      (m) => this.gatewayByMarket.get(m.toLowerCase()) ?? defaultGateway,
+    );
+  }
+
   getTokenAddress(): `0x${string}` {
     if (!this.tokenAddress) {
       throw new Error("Requires tokenAddress. Set DELPHI_TOKEN_ADDRESS environment variable.");
@@ -273,7 +400,7 @@ export class DelphiClient {
   // ─── Quotes (read-only, no gas) ────────────────────────────────────────────
 
   async quoteBuy(params: QuoteBuyParams): Promise<QuoteBuyResponse> {
-    const gatewayAddress = this.getGatewayAddress();
+    const gatewayAddress = await this.resolveGateway(params.marketAddress);
     const { publicClient } = await this.getSigner();
 
     const tokensIn = (await publicClient.readContract({
@@ -287,7 +414,7 @@ export class DelphiClient {
   }
 
   async quoteSell(params: QuoteSellParams): Promise<QuoteSellResponse> {
-    const gatewayAddress = this.getGatewayAddress();
+    const gatewayAddress = await this.resolveGateway(params.marketAddress);
     const { publicClient } = await this.getSigner();
 
     const tokensOut = (await publicClient.readContract({
@@ -308,7 +435,7 @@ export class DelphiClient {
    * winning shares to redeem.
    */
   async quoteRedeem(params: QuoteRedeemParams): Promise<QuoteRedeemResponse> {
-    const gatewayAddress = this.getGatewayAddress();
+    const gatewayAddress = await this.resolveGateway(params.marketAddress);
     const { address, publicClient } = await this.getSigner();
 
     const { result } = await publicClient.simulateContract({
@@ -331,7 +458,7 @@ export class DelphiClient {
    * market is not liquidatable or the account holds no shares in those outcomes.
    */
   async quoteLiquidate(params: QuoteLiquidateParams): Promise<QuoteLiquidateResponse> {
-    const gatewayAddress = this.getGatewayAddress();
+    const gatewayAddress = await this.resolveGateway(params.marketAddress);
     const { address, publicClient } = await this.getSigner();
 
     const outcomeIndicesBigInt = params.outcomeIndices.map((idx) => BigInt(idx));
@@ -351,7 +478,7 @@ export class DelphiClient {
   // ─── Buy / Sell (on-chain via Gateway) ──────────────────────────────────────
 
   async buyShares(params: BuySharesParams): Promise<BuySharesResponse> {
-    const gatewayAddress = this.getGatewayAddress();
+    const gatewayAddress = await this.resolveGateway(params.marketAddress);
     const { address, walletClient, publicClient } = await this.getSigner();
 
     const contractCall = {
@@ -376,7 +503,7 @@ export class DelphiClient {
   }
 
   async sellShares(params: SellSharesParams): Promise<SellSharesResponse> {
-    const gatewayAddress = this.getGatewayAddress();
+    const gatewayAddress = await this.resolveGateway(params.marketAddress);
     const { address, walletClient, publicClient } = await this.getSigner();
 
     const contractCall = {
@@ -402,7 +529,7 @@ export class DelphiClient {
   // ─── Redeem (on-chain via Gateway) ──────────────────────────────────────────
 
   async redeemMarket(params: RedeemMarketParams): Promise<RedeemMarketResponse> {
-    const gatewayAddress = this.getGatewayAddress();
+    const gatewayAddress = await this.resolveGateway(params.marketAddress);
     const { address, walletClient, publicClient } = await this.getSigner();
 
     const contractCall = {
@@ -430,9 +557,28 @@ export class DelphiClient {
     };
   }
 
+  /**
+   * Redeems winning shares across several settled markets, collecting per-market
+   * results instead of failing the whole batch on the first error.
+   *
+   * Only `settled` markets are redeemable. `expired` and `failed` markets have no
+   * winning outcome, so `redeem()` reverts for them and their funds are recovered
+   * with {@link liquidate} instead — check {@link getMarketStatus} when a portfolio
+   * may contain them.
+   */
   async redeemPositions(params: RedeemPositionsParams): Promise<RedeemPositionsResponse> {
     const results: RedeemPositionsResponse["results"] = [];
     let totalTokensOut = 0n;
+
+    // Resolve the whole batch in one multicall so the per-market `redeemMarket`
+    // calls below hit the cache, instead of one routing round trip per market.
+    // Routing failures are not fatal here: an unresolved market falls back to the
+    // default gateway and surfaces as that market's own error.
+    try {
+      await this.resolveGateways(params.marketAddresses);
+    } catch {
+      // Ignore — resolution is retried per market by redeemMarket.
+    }
 
     for (const marketAddress of params.marketAddresses) {
       try {
@@ -461,7 +607,7 @@ export class DelphiClient {
    * and returns the burned shares per outcome along with total tokens received.
    */
   async liquidate(params: LiquidateParams): Promise<LiquidateResponse> {
-    const gatewayAddress = this.getGatewayAddress();
+    const gatewayAddress = await this.resolveGateway(params.marketAddress);
     const { address, walletClient, publicClient } = await this.getSigner();
 
     const outcomeIndicesBigInt = params.outcomeIndices.map((idx) => BigInt(idx));
@@ -489,6 +635,48 @@ export class DelphiClient {
       sharesIn,
       totalTokensOut,
     };
+  }
+
+  // ─── Market Status (on-chain, read-only) ────────────────────────────────────
+
+  /**
+   * Reads a market's lifecycle status directly from its gateway.
+   *
+   * Unlike {@link getMarket}, this hits the chain rather than the indexed REST API,
+   * so it reflects state that has not been indexed yet. Automated-settlement markets
+   * can report `failed` (the oracle ran but could not resolve the question); legacy
+   * markets never do.
+   *
+   * `settled` markets are exited with {@link redeemMarket}; `expired` and `failed`
+   * markets have no winning outcome and are exited with {@link liquidate}.
+   */
+  async getMarketStatus(marketAddress: `0x${string}`): Promise<MarketStatus> {
+    const gatewayAddress = await this.resolveGateway(marketAddress);
+    const { publicClient } = await this.getSigner();
+
+    const status = (await publicClient.readContract({
+      address: gatewayAddress,
+      abi: DYNAMIC_PARIMUTUEL_GATEWAY_ABI as Abi,
+      functionName: "marketStatus",
+      args: [marketAddress],
+    })) as number;
+
+    // IDynamicParimutuelMarketTypes.MarketStatus. FAILED (4) exists only on the
+    // automated-settlement implementation.
+    const statuses: MarketStatus[] = [
+      "open",
+      "awaiting_settlement",
+      "settled",
+      "expired",
+      "failed",
+    ];
+    const mapped = statuses[Number(status)];
+    if (!mapped) {
+      throw new Error(
+        `Unknown market status ${status} for ${marketAddress} — the gateway ABI may be out of date.`,
+      );
+    }
+    return mapped;
   }
 
   // ─── Token Approval (on-chain) ─────────────────────────────────────────────
@@ -648,6 +836,9 @@ export class DelphiClient {
    * Outcome counts are derived from market metadata.
    * Returns human-readable floats: spot prices decimal-adjusted by the token,
    * implied probabilities as values between 0 and 1.
+   *
+   * Markets are addressed through their own deployment's gateway, so a batch may
+   * legitimately span both the legacy and automated gateways.
    */
   private async fetchPricesForMarkets(
     markets: Market[],
@@ -655,23 +846,27 @@ export class DelphiClient {
     const result = new Map<string, { spotPrices: number[]; spotImpliedProbabilities: number[] }>();
     if (markets.length === 0) return result;
 
-    const gatewayAddress = this.getGatewayAddress();
     const tokenAddress = this.getTokenAddress();
     const { publicClient } = await this.getSigner();
     const gatewayAbi = DYNAMIC_PARIMUTUEL_GATEWAY_ABI as Abi;
     const erc20Abi = ERC20_ABI as Abi;
+
+    // Resolve every market's gateway up front (one batched multicall) so the price
+    // calls below can be mixed across deployments in a single round trip.
+    const gateways = await this.resolveGateways(markets.map((m) => m.id as `0x${string}`));
 
     // Accumulate spotPrices + spotImpliedProbabilities contracts per market.
     // Slot indices below are relative to the price contracts array (before prepending decimals).
     const priceContracts: { address: `0x${string}`; abi: Abi; functionName: string; args: unknown[] }[] = [];
     const marketPriceSlots: { marketId: string; slotPrices: number; slotProbs: number }[] = [];
 
-    for (const m of markets) {
+    markets.forEach((m, marketIdx) => {
       const n = m.metadata?.outcomes?.length ?? 0;
       if (n === 0) {
         result.set(m.id, { spotPrices: [], spotImpliedProbabilities: [] });
-        continue;
+        return;
       }
+      const gatewayAddress = gateways[marketIdx];
       const indices = Array.from({ length: n }, (_, j) => BigInt(j));
       marketPriceSlots.push({
         marketId: m.id,
@@ -682,7 +877,7 @@ export class DelphiClient {
         { address: gatewayAddress, abi: gatewayAbi, functionName: "spotPrices", args: [m.id as `0x${string}`, indices] },
         { address: gatewayAddress, abi: gatewayAbi, functionName: "spotImpliedProbabilities", args: [m.id as `0x${string}`, indices] },
       );
-    }
+    });
 
     if (priceContracts.length === 0) return result;
 

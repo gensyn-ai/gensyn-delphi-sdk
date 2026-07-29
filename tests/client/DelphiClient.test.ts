@@ -155,7 +155,7 @@ describe("DelphiClient – pricesAndImpliedProbabilities", () => {
   const makeMarket = (id: string, outcomes: string[] = ["Yes", "No"]) => ({
     id,
     appMarketId: `uuid-${id}`,
-    status: "active",
+    status: "open",
     category: "crypto",
     deployer: "0xdeployer",
     implementation: "",
@@ -441,7 +441,7 @@ describe("DelphiClient – Read APIs", () => {
   // ── listMarkets ──────────────────────────────────────────────────────────────
 
   it("listMarkets() should GET /markets with default params", async () => {
-    const body = { markets: [{ id: "m1", appMarketId: "uuid-1234", status: "active" }] };
+    const body = { markets: [{ id: "m1", appMarketId: "uuid-1234", status: "open" }] };
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify(body), { status: 200 }),
     );
@@ -516,7 +516,7 @@ describe("DelphiClient – Read APIs", () => {
   // ── getMarket ────────────────────────────────────────────────────────────────
 
   it("getMarket() should GET /markets/:id", async () => {
-    const market = { id: "abc-123", appMarketId: "uuid-abc-123", status: "active", deployer: "0xabc" };
+    const market = { id: "abc-123", appMarketId: "uuid-abc-123", status: "open", deployer: "0xabc" };
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify(market), { status: 200 }),
     );

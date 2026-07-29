@@ -8,6 +8,39 @@ TypeScript SDK for agents to interact with the Delphi information market platfor
 npm install @gensyn-ai/gensyn-delphi-sdk
 ```
 
+## Upgrading to 2.0.0
+
+2.0.0 adds support for the automated-settlement deployment, which now receives every new
+market on every network. Most code needs no change — all trading, quoting, redemption and
+liquidation call signatures are identical across both deployments. Three things are breaking.
+
+**1. The default subgraph no longer exposes `gatewayWinnerSubmitteds`.** The default
+`subgraphUrl` now points at `delphi-testnet-autoset` / `delphi-mainnet-autoset`, where the
+settlement entity is `gatewayMarketSettleds` with an identical payload. `SubgraphClient` throws
+on GraphQL errors, so a query for the old entity fails hard rather than returning empty. Rename
+the entity, or set `DELPHI_SUBGRAPH_URL` to the previous `delphi-testnet` / `delphi-mainnet`
+subgraphs to keep querying legacy history. `gatewayBuys`, `gatewaySells`, `gatewayRedemptions`
+and `gatewayLiquidations` are unchanged.
+
+**2. Status fields are narrowed to `MarketStatus`, with a new `failed` member.**
+`Market.status`, `Position.marketStatus` and `ListMarketsParams.status` were `string` and are now
+the union `"open" | "awaiting_settlement" | "settled" | "expired" | "failed"`. Passing a
+dynamically-typed `string` to the `status` filter needs a cast or validation, and an exhaustive
+`switch` over a status needs a `failed` arm. `failed` markets have no winning outcome, so they
+exit through `liquidate()` — see [Market Lifecycle](#market-lifecycle).
+
+**3. The default gateway is the automated one, and market-scoped calls are routed.**
+`gatewayAddress` / `factoryAddress` now default to the automated-settlement contracts, with the
+originals available as `legacyGatewayAddress` / `legacyFactoryAddress`. Every market-scoped call
+resolves its owning gateway first, so addresses from either deployment work without configuration.
+Setting `gatewayAddress` or `DELPHI_GATEWAY_CONTRACT` now **pins every call to that gateway and
+disables routing** — previously it simply set the only gateway there was. Unset it unless you are
+targeting a local deployment.
+
+New in this release: `resolveGateway()`, `getMarketStatus()`,
+`SubgraphClient.getMarketSettlement()`, the `MarketStatus` type, and
+`LIQUIDATABLE_MARKET_STATUSES`.
+
 ## Quick Start
 
 ```typescript
@@ -60,7 +93,10 @@ An API key is required for all REST API endpoints (listing markets, querying pos
 | `DELPHI_SIGNER_TYPE` | Signing method: `cdp_server_wallet` or `private_key` | `cdp_server_wallet` |
 | `DELPHI_API_ACCESS_KEY` | REST API key (see [API Key](#api-key) above) | — |
 | `DELPHI_API_BASE_URL` | Override the REST API base URL | *(network default)* |
-| `DELPHI_GATEWAY_CONTRACT` | Override the Gateway contract address | *(network default)* |
+| `DELPHI_GATEWAY_CONTRACT` | Override the Gateway address. Pins **every** call to this gateway and disables per-market routing | *(network default)* |
+| `DELPHI_LEGACY_GATEWAY_CONTRACT` | Override the legacy Gateway address used for legacy markets | *(network default)* |
+| `DELPHI_FACTORY_CONTRACT` | Override the automated-settlement Factory (used to route markets) | *(network default)* |
+| `DELPHI_LEGACY_FACTORY_CONTRACT` | Override the legacy Factory (used to route markets) | *(network default)* |
 | `DELPHI_TOKEN_ADDRESS` | Override the ERC-20 token (USDC) address | *(network default)* |
 | `DELPHI_SUBGRAPH_URL` | Override the Goldsky subgraph endpoint | *(network default)* |
 | `DELPHI_APP_URL` | Override the Delphi app base URL (used to build `marketUrl`) | *(network default)* |
@@ -88,11 +124,71 @@ An API key is required for all REST API endpoints (listing markets, querying pos
 |---|---|---|
 | Chain ID | `685685` | `685689` |
 | RPC URL | `https://gensyn-testnet.g.alchemy.com/public` | `https://gensyn-mainnet.g.alchemy.com/public` |
-| Gateway | `0x7b8FDBD187B0Be5e30e48B1995df574A62667147` | `0x4e4e85c52E0F414cc67eE88d0C649Ec81698d700` |
+| Gateway (automated settlement) | `0x22ea355D7218Dc86b4c83732cBbd01f7Ff2332b3` | `0x982a67aE92D8de361957249fB2BB4a62BCc6A8d5` |
+| Factory (automated settlement) | `0x97d2b3F0614C8189343A38094629FCE2910b727A` | `0x9C73417f79a1361c6aF9Bd828343badEE1b84936` |
+| Gateway (legacy) | `0x7b8FDBD187B0Be5e30e48B1995df574A62667147` | `0x4e4e85c52E0F414cc67eE88d0C649Ec81698d700` |
+| Factory (legacy) | `0xd03CEC55802f0D44D844384E1144B25717315E5A` | `0x4596d847eA56DCf9A37944c13793Af802Fc5D1eC` |
 | Token (USDC) | `0x0724D6079b986F8e44bDafB8a09B60C0bd6A45a1` | `0x5b32c997211621d55a89Cc5abAF1cC21F3A6ddF5` |
 | API URL | `https://delphi-api.gensyn.ai/` | `https://api.delphi.fyi/` |
-| Subgraph URL | [Goldsky endpoint](https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-testnet/1.0.0/gn) | [Goldsky endpoint](https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-mainnet/1.0.0/gn) |
+| Subgraph URL | [Goldsky endpoint](https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-testnet-autoset/1.0.0/gn) | [Goldsky endpoint](https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-mainnet-autoset/1.0.0/gn) |
 | App URL | `https://testnet.delphi.fyi` | `https://app.delphi.fyi` |
+
+### Market Deployments and Gateway Routing
+
+Delphi runs two contract deployments side by side on each network:
+
+- **Automated settlement** — every new market. Settled by the Truebit oracle relayer, which
+  can also report that it *could not* resolve the question, leaving the market `failed`.
+- **Legacy** — markets created before automated settlement, settled manually by the market
+  creator. Its factory no longer produces markets, but existing positions there are still
+  redeemable and liquidatable.
+
+Each gateway only accepts markets deployed by its own factory and reverts with
+`MarketProxyNotDeployedByFactory` for anything else. The client handles this for you: every
+market-scoped call resolves the owning gateway first (one batched `marketProxiesExist` probe
+across both factories, cached per market for the client's lifetime). You can pass a market
+address from either deployment and it just works.
+
+Setting `gatewayAddress` (or `DELPHI_GATEWAY_CONTRACT`) pins all calls to that one gateway and
+skips routing — useful for a local deployment, but calls will revert if you pass a market that
+gateway does not own.
+
+One caveat: the default `subgraphUrl` indexes the **automated-settlement gateway only**. REST and
+on-chain methods cover both deployments, but subgraph queries for a legacy market return empty.
+Point `subgraphUrl` (or `DELPHI_SUBGRAPH_URL`) at the older `delphi-testnet` / `delphi-mainnet`
+subgraphs to query legacy activity.
+
+To resolve a gateway yourself:
+
+```typescript
+const gateway = await client.resolveGateway("0x...");
+```
+
+### Market Lifecycle
+
+| Status | Meaning | How holders exit |
+|---|---|---|
+| `open` | Trading is open | `sellShares` |
+| `awaiting_settlement` | Trading closed, no outcome yet | — |
+| `settled` | A winning outcome was set | `redeemMarket` |
+| `expired` | Settlement deadline passed with no outcome | `liquidate` |
+| `failed` | Settlement ran but could not resolve | `liquidate` |
+
+`failed` occurs only on automated-settlement markets. Like `expired` it has **no winning
+outcome**, so `redeem()` reverts — funds are recovered with `liquidate()` instead. If you sweep
+a portfolio with `redeemPositions`, check the status first and route `expired`/`failed` markets
+to `liquidate`:
+
+```typescript
+import { LIQUIDATABLE_MARKET_STATUSES } from "@gensyn-ai/gensyn-delphi-sdk";
+
+const status = await client.getMarketStatus(marketAddress);
+if (LIQUIDATABLE_MARKET_STATUSES.includes(status)) {
+  await client.liquidate({ marketAddress, outcomeIndices: [0, 1] });
+} else if (status === "settled") {
+  await client.redeemMarket({ marketAddress });
+}
+```
 
 ### Config Object
 
@@ -207,7 +303,7 @@ Each market object includes:
 
 ```typescript
 const { markets } = await client.listMarkets({
-  status: "open",         // "open" | "closed" | "settled"
+  status: "open",         // "open" | "awaiting_settlement" | "settled" | "expired" | "failed"
   category: "crypto",     // "crypto" | "culture" | "economics" | "miscellaneous" | "politics" | "sports"
   orderBy: "liquidity",   // "liquidity" (default) | "created" | "settles_at"
   verifiable: true,       // filter by verifiable settlement
@@ -315,13 +411,30 @@ for (const result of results) {
 
 #### `liquidate(params)`
 
-Liquidate positions on an expired market. Burns shares across the specified outcome indices and returns the collateral tokens.
+Liquidate positions on an `expired` or `failed` market. Burns shares across the specified outcome indices and returns the collateral tokens. This is the exit path for markets with no winning outcome — see [Market Lifecycle](#market-lifecycle).
 
 ```typescript
 const { transactionHash, sharesIn, totalTokensOut } = await client.liquidate({
   marketAddress: "0xMarket",
   outcomeIndices: [0, 1], // all outcome indices for the market
 });
+```
+
+#### `getMarketStatus(marketAddress)`
+
+Read a market's lifecycle status directly from its gateway. Unlike `getMarket()`, this hits the chain rather than the indexed REST API, so it reflects state that has not been indexed yet.
+
+```typescript
+const status = await client.getMarketStatus("0xMarket");
+// "open" | "awaiting_settlement" | "settled" | "expired" | "failed"
+```
+
+#### `resolveGateway(marketAddress)`
+
+Return the gateway address that serves a market — the automated-settlement gateway or the legacy one. Called automatically by every market-scoped method; exposed for callers that need it directly. See [Market Deployments and Gateway Routing](#market-deployments-and-gateway-routing).
+
+```typescript
+const gateway = await client.resolveGateway("0xMarket");
 ```
 
 #### `getTokenAllowance(params)`
@@ -391,7 +504,7 @@ Query on-chain event data indexed by the Goldsky subgraph.
 
 #### `getSubgraph()`
 
-Access the `SubgraphClient` for querying historical trade data.
+Access the `SubgraphClient` for querying historical trade and settlement data. The default endpoint indexes the automated-settlement gateway — see [Market Deployments and Gateway Routing](#market-deployments-and-gateway-routing).
 
 ```typescript
 const subgraph = client.getSubgraph();
@@ -400,6 +513,11 @@ const subgraph = client.getSubgraph();
 const { buys, sells } = await subgraph.getMarketTrades("0xMarketProxy", {
   first: 20,
 });
+
+// Fetch how a market settled. `settled` and `failed` are mutually exclusive:
+// a failed market has no winning outcome, so holders exit via liquidate().
+const { settled, failed, resolutionRequests } =
+  await subgraph.getMarketSettlement("0xMarketProxy");
 
 // Check subgraph indexing metadata
 const meta = await subgraph.getMeta();

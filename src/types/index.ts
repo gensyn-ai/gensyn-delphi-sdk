@@ -182,6 +182,48 @@ export interface EnsureTokenApprovalResponse {
   transactionHash?: `0x${string}`;
 }
 
+// ─── Market Status ────────────────────────────────────────────────────────────
+
+/**
+ * Lifecycle status of a market.
+ *
+ * | Status                | Meaning                                                          |
+ * |-----------------------|------------------------------------------------------------------|
+ * | `open`                | Trading is open.                                                 |
+ * | `awaiting_settlement` | Trading closed, awaiting a winning outcome.                      |
+ * | `settled`             | A winning outcome was set — holders `redeem()`.                  |
+ * | `expired`             | Settlement deadline passed with no winner — holders `liquidate()`.|
+ * | `failed`              | Settlement ran but could not resolve — holders `liquidate()`.    |
+ *
+ * `failed` only occurs on automated-settlement markets: the oracle explicitly
+ * failed to resolve the question. Like `expired` it has no winning outcome, so
+ * `redeem()` reverts and funds are recovered via `liquidate()` instead.
+ */
+export type MarketStatus =
+  | "open"
+  | "awaiting_settlement"
+  | "settled"
+  | "expired"
+  | "failed";
+
+/**
+ * Market statuses that have no winning outcome and must be exited via `liquidate()`
+ * rather than `redeem()`.
+ *
+ * Typed as `readonly MarketStatus[]` (not a literal tuple) so `.includes()` accepts any
+ * `MarketStatus` without a cast.
+ */
+export const LIQUIDATABLE_MARKET_STATUSES: readonly MarketStatus[] = ["expired", "failed"];
+
+/**
+ * Which on-chain deployment a market belongs to.
+ *
+ * `automated` markets settle via the Truebit oracle relayer and can end up
+ * `failed`; `legacy` markets are settled manually by the market creator. The two
+ * deployments have separate factories and gateways and do not interoperate.
+ */
+export type MarketDeployment = "legacy" | "automated";
+
 // ─── REST API: Market ─────────────────────────────────────────────────────────
 
 export interface MarketMetadata {
@@ -206,7 +248,7 @@ export interface Market {
   appMarketId: string;
   /** Direct link to the market on the Delphi app */
   marketUrl: string;
-  status: string;
+  status: MarketStatus;
   category: string;
   /** Wallet address of the market creator */
   deployer: string;
@@ -240,7 +282,7 @@ export interface ListMarketsParams {
   /** Sort order: "liquidity" (default, volume + initial liquidity) | "created" (newest first) | "settles_at" (earliest settlement first) */
   orderBy?: string;
   /** Filter by market status */
-  status?: string;
+  status?: MarketStatus;
   /** Filter by market category (crypto, culture, economics, miscellaneous, politics, sports) */
   category?: string;
   /** Filter by verifiable settlement */
@@ -273,7 +315,7 @@ export interface Position {
   /** True if the position has been redeemed or liquidated */
   redeemedOrLiquidated: boolean;
   tokensRedeemed: string;
-  marketStatus: string;
+  marketStatus: MarketStatus;
 }
 
 export interface ListPositionsParams {
@@ -325,6 +367,49 @@ export interface SubgraphSell {
   tokensOut: string | null;
 }
 
+/**
+ * Oracle-driven settlement on the automated-settlement gateway.
+ *
+ * Replaces the legacy gateway's `gatewayWinnerSubmitteds` entity and carries an
+ * identical payload — the legacy subgraph has the old name, this one the new.
+ */
+export interface SubgraphMarketSettled {
+  id: string;
+  block_number: string;
+  timestamp_: string;
+  transactionHash_: string;
+  contractId_: string;
+  marketProxy: string | null;
+  winningOutcomeIdx: string | null;
+  marketCreatorReward: string | null;
+  refund: string | null;
+  marketCreatorTradingFeesCut: string | null;
+}
+
+/**
+ * The oracle ran but could not resolve the market. There is no winning outcome,
+ * so holders exit via `liquidate()` rather than `redeem()`.
+ */
+export interface SubgraphMarketFailed {
+  id: string;
+  block_number: string;
+  timestamp_: string;
+  transactionHash_: string;
+  contractId_: string;
+  marketProxy: string | null;
+}
+
+/** A keeper triggered oracle resolution for a market. */
+export interface SubgraphMarketResolutionRequested {
+  id: string;
+  block_number: string;
+  timestamp_: string;
+  transactionHash_: string;
+  contractId_: string;
+  marketProxy: string | null;
+  keeper: string | null;
+}
+
 export interface SubgraphMeta {
   block: { number: number; timestamp: number | null; hash: string | null };
   deployment: string;
@@ -360,7 +445,23 @@ export interface DelphiClientConfig {
   // ── Shared chain config ────────────────────────────────────────────────────
   rpcUrl?: string;
   chainId?: number;
+  /**
+   * Gateway for the automated-settlement deployment — where all new markets live.
+   *
+   * Used as the default for any market the client cannot attribute to a specific
+   * deployment. Set this to pin every call to one gateway and skip routing.
+   */
   gatewayAddress?: `0x${string}`;
+  /**
+   * Gateway for the legacy (creator-settled) deployment. Its factory no longer
+   * produces markets, but existing positions there still need redeem/liquidate,
+   * so the client routes to it for markets deployed by `legacyFactoryAddress`.
+   */
+  legacyGatewayAddress?: `0x${string}`;
+  /** Factory backing `gatewayAddress`. Used to attribute a market to the automated deployment. */
+  factoryAddress?: `0x${string}`;
+  /** Factory backing `legacyGatewayAddress`. Used to attribute a market to the legacy deployment. */
+  legacyFactoryAddress?: `0x${string}`;
   /** ERC-20 token address used for all markets. Falls back to DELPHI_TOKEN_ADDRESS env var, then network default. */
   tokenAddress?: `0x${string}`;
 

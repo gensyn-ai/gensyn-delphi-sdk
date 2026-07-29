@@ -1,6 +1,9 @@
 import type {
   SubgraphBuy,
   SubgraphSell,
+  SubgraphMarketSettled,
+  SubgraphMarketFailed,
+  SubgraphMarketResolutionRequested,
   SubgraphMeta,
 } from "../types/index.js";
 
@@ -94,6 +97,60 @@ export class SubgraphClient {
       }
     }`);
     return { buys: data.gatewayBuys, sells: data.gatewaySells };
+  }
+
+  /**
+   * Fetch the settlement history for a market: the oracle's outcome (if it resolved),
+   * the failure record (if it could not), and any keeper-triggered resolution requests.
+   *
+   * A market yields at most one of `settled` / `failed` — they are mutually exclusive
+   * terminal states. `failed` means there is no winning outcome, so holders exit via
+   * `liquidate()` rather than `redeem()`.
+   *
+   * Only meaningful against an automated-settlement subgraph; the legacy subgraph
+   * records settlement under `gatewayWinnerSubmitteds` instead and returns empty here.
+   */
+  async getMarketSettlement(
+    marketProxy: string,
+    params: { first?: number } = {},
+  ): Promise<{
+    settled: SubgraphMarketSettled[];
+    failed: SubgraphMarketFailed[];
+    resolutionRequests: SubgraphMarketResolutionRequested[];
+  }> {
+    const first = params.first ?? 100;
+
+    const data = await this.query<{
+      gatewayMarketSettleds: SubgraphMarketSettled[];
+      gatewayMarketFaileds: SubgraphMarketFailed[];
+      marketResolutionRequesteds: SubgraphMarketResolutionRequested[];
+    }>(`{
+      gatewayMarketSettleds(
+        first: ${first}, orderBy: timestamp_, orderDirection: desc,
+        where: { marketProxy: "${marketProxy}" }
+      ) {
+        id block_number timestamp_ transactionHash_ contractId_
+        marketProxy winningOutcomeIdx marketCreatorReward refund marketCreatorTradingFeesCut
+      }
+      gatewayMarketFaileds(
+        first: ${first}, orderBy: timestamp_, orderDirection: desc,
+        where: { marketProxy: "${marketProxy}" }
+      ) {
+        id block_number timestamp_ transactionHash_ contractId_ marketProxy
+      }
+      marketResolutionRequesteds(
+        first: ${first}, orderBy: timestamp_, orderDirection: desc,
+        where: { marketProxy: "${marketProxy}" }
+      ) {
+        id block_number timestamp_ transactionHash_ contractId_ marketProxy keeper
+      }
+    }`);
+
+    return {
+      settled: data.gatewayMarketSettleds,
+      failed: data.gatewayMarketFaileds,
+      resolutionRequests: data.marketResolutionRequesteds,
+    };
   }
 
   /**
