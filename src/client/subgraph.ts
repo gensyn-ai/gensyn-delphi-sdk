@@ -14,7 +14,19 @@ import type {
  * GraphQL, plus typed convenience methods for the most common entities.
  */
 export class SubgraphClient {
-  constructor(private readonly subgraphUrl: string) {}
+  /**
+   * @param subgraphUrl Goldsky endpoint to query.
+   * @param options.settlementEconomics Whether this subgraph's `GatewayMarketSettled`
+   *   carries the market-creator economics (`marketCreatorReward`, `refund`,
+   *   `marketCreatorTradingFeesCut`). True for the delphi `-autoset` subgraphs.
+   *   The competition's LMSR gateway emits a narrower `MarketSettled` without them,
+   *   and this client throws on GraphQL errors, so requesting them there would fail
+   *   the whole query — pass false to omit them (they come back `null`).
+   */
+  constructor(
+    private readonly subgraphUrl: string,
+    private readonly options: { settlementEconomics?: boolean } = {},
+  ) {}
 
   // ─── Generic Query ────────────────────────────────────────────────────────
 
@@ -119,6 +131,7 @@ export class SubgraphClient {
     resolutionRequests: SubgraphMarketResolutionRequested[];
   }> {
     const first = params.first ?? 100;
+    const economics = this.options.settlementEconomics ?? true;
 
     const data = await this.query<{
       gatewayMarketSettleds: SubgraphMarketSettled[];
@@ -130,7 +143,7 @@ export class SubgraphClient {
         where: { marketProxy: "${marketProxy}" }
       ) {
         id block_number timestamp_ transactionHash_ contractId_
-        marketProxy winningOutcomeIdx marketCreatorReward refund marketCreatorTradingFeesCut
+        marketProxy winningOutcomeIdx${economics ? " marketCreatorReward refund marketCreatorTradingFeesCut" : ""}
       }
       gatewayMarketFaileds(
         first: ${first}, orderBy: timestamp_, orderDirection: desc,
@@ -147,7 +160,16 @@ export class SubgraphClient {
     }`);
 
     return {
-      settled: data.gatewayMarketSettleds,
+      // Keep the returned shape identical across subgraphs: fields the narrower
+      // LMSR payload never carries are reported as null rather than absent.
+      settled: economics
+        ? data.gatewayMarketSettleds
+        : data.gatewayMarketSettleds.map((s) => ({
+            ...s,
+            marketCreatorReward: null,
+            refund: null,
+            marketCreatorTradingFeesCut: null,
+          })),
       failed: data.gatewayMarketFaileds,
       resolutionRequests: data.marketResolutionRequesteds,
     };

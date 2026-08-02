@@ -89,7 +89,7 @@ An API key is required for all REST API endpoints (listing markets, querying pos
 
 | Variable | Description | Default |
 |---|---|---|
-| `DELPHI_NETWORK` | Network to use: `testnet` or `mainnet` | `testnet` |
+| `DELPHI_NETWORK` | Network to use: `testnet`, `mainnet` or `competition-testnet` | `testnet` |
 | `DELPHI_SIGNER_TYPE` | Signing method: `cdp_server_wallet` or `private_key` | `cdp_server_wallet` |
 | `DELPHI_API_ACCESS_KEY` | REST API key (see [API Key](#api-key) above) | — |
 | `DELPHI_API_BASE_URL` | Override the REST API base URL | *(network default)* |
@@ -120,18 +120,50 @@ An API key is required for all REST API endpoints (listing markets, querying pos
 
 ### Network Defaults
 
-| | Testnet | Mainnet |
-|---|---|---|
-| Chain ID | `685685` | `685689` |
-| RPC URL | `https://gensyn-testnet.g.alchemy.com/public` | `https://gensyn-mainnet.g.alchemy.com/public` |
-| Gateway (automated settlement) | `0x22ea355D7218Dc86b4c83732cBbd01f7Ff2332b3` | `0x982a67aE92D8de361957249fB2BB4a62BCc6A8d5` |
-| Factory (automated settlement) | `0x97d2b3F0614C8189343A38094629FCE2910b727A` | `0x9C73417f79a1361c6aF9Bd828343badEE1b84936` |
-| Gateway (legacy) | `0x7b8FDBD187B0Be5e30e48B1995df574A62667147` | `0x4e4e85c52E0F414cc67eE88d0C649Ec81698d700` |
-| Factory (legacy) | `0xd03CEC55802f0D44D844384E1144B25717315E5A` | `0x4596d847eA56DCf9A37944c13793Af802Fc5D1eC` |
-| Token (USDC) | `0x0724D6079b986F8e44bDafB8a09B60C0bd6A45a1` | `0x5b32c997211621d55a89Cc5abAF1cC21F3A6ddF5` |
-| API URL | `https://delphi-api.gensyn.ai/` | `https://api.delphi.fyi/` |
-| Subgraph URL | [Goldsky endpoint](https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-testnet-autoset/1.0.0/gn) | [Goldsky endpoint](https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-mainnet-autoset/1.0.0/gn) |
-| App URL | `https://testnet.delphi.fyi` | `https://app.delphi.fyi` |
+| | Testnet | Mainnet | Competition Testnet |
+|---|---|---|---|
+| Chain ID | `685685` | `685689` | `685685` |
+| RPC URL | `https://gensyn-testnet.g.alchemy.com/public` | `https://gensyn-mainnet.g.alchemy.com/public` | `https://gensyn-testnet.g.alchemy.com/public` |
+| Gateway (automated settlement) | `0x22ea355D7218Dc86b4c83732cBbd01f7Ff2332b3` | `0x982a67aE92D8de361957249fB2BB4a62BCc6A8d5` | `0x097599c9D966fF496284b892A8F13BF885b258ef` |
+| Factory (automated settlement) | `0x97d2b3F0614C8189343A38094629FCE2910b727A` | `0x9C73417f79a1361c6aF9Bd828343badEE1b84936` | `0xEa9D0a78d0209916e88e363B8FDa3e23206Ff49b` |
+| Gateway (legacy) | `0x7b8FDBD187B0Be5e30e48B1995df574A62667147` | `0x4e4e85c52E0F414cc67eE88d0C649Ec81698d700` | — *(no legacy deployment)* |
+| Factory (legacy) | `0xd03CEC55802f0D44D844384E1144B25717315E5A` | `0x4596d847eA56DCf9A37944c13793Af802Fc5D1eC` | — *(no legacy deployment)* |
+| Token | `0x0724D6079b986F8e44bDafB8a09B60C0bd6A45a1` (USDC) | `0x5b32c997211621d55a89Cc5abAF1cC21F3A6ddF5` (USDC) | `0x8A2d75753362Eb5D5669a2c22cbf394b26a0571F` (competition token) |
+| API URL | `https://delphi-api.gensyn.ai/` | `https://api.delphi.fyi/` | `https://delphi-api.gensyn.ai/` |
+| Subgraph URL | [Goldsky endpoint](https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-testnet-autoset/1.0.0/gn) | [Goldsky endpoint](https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-mainnet-autoset/1.0.0/gn) | [Goldsky endpoint](https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-agent-competition/1.0.0/gn) |
+| App URL | `https://testnet.delphi.fyi` | `https://app.delphi.fyi` | `https://agent-competition.gensyn.ai` |
+
+#### Competition networks
+
+`competition-testnet` targets the agent trading competition: the same chain as
+testnet, the competition's own LMSR contracts (identical gateway call
+signatures, so trading/quoting/redeeming work unchanged), and the same REST
+API deployment. The client automatically sends `X-Delphi-Mode: competition`
+on REST requests so `listMarkets`/`getMarket`/`listPositions` return
+competition data. Market reads are scoped to the **active competition** by
+default; pass `competitionId` to `listMarkets`/`getMarket` to read a specific
+one.
+
+The competition has a single, oracle-settled deployment — there is no legacy
+competition gateway — so per-market gateway routing is inert here and every
+call goes to the competition gateway. See
+[Market Deployments and Gateway Routing](#market-deployments-and-gateway-routing).
+
+The competition has its own Goldsky subgraph indexing the LMSR gateway from
+its deployment block (`21525320`), so `getSubgraph()` and `getMarketTrades()`
+work as they do on testnet/mainnet. It is automated-settlement shaped like the
+`-autoset` subgraphs — `gatewayBuys`, `gatewaySells`, `gatewayRedemptions`,
+`gatewayLiquidations` and `gatewayMarketSettleds`, with no
+`gatewayWinnerSubmitteds` (see [Upgrading to 2.0.0](#upgrading-to-200)).
+
+One difference: the LMSR gateway's `MarketSettled` has no market-creator
+economics, so the competition's `gatewayMarketSettleds` lacks
+`marketCreatorReward`, `refund` and `marketCreatorTradingFeesCut`.
+`getMarketSettlement()` handles this — it omits those fields from the query on
+competition networks and returns them as `null`, so the result shape is the
+same on every network. If you hand-write a settlement query against the
+competition subgraph, do not request them: `SubgraphClient` throws on GraphQL
+errors, so an unknown field fails the whole query.
 
 ### Market Deployments and Gateway Routing
 

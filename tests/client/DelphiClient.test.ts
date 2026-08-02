@@ -615,3 +615,148 @@ describe("DelphiClient – Read APIs", () => {
     await expect(c.listMarkets()).rejects.toThrow("Requires apiKey");
   });
 });
+
+// ─── Competition Network Tests ───────────────────────────────────────────────
+
+describe("DelphiClient – competition-testnet network", () => {
+  const API_BASE = "https://api.example.com";
+  const API_KEY = "test-api-key";
+
+  let fetchSpy: any;
+
+  beforeEach(() => {
+    delete process.env.DELPHI_NETWORK;
+    delete process.env.DELPHI_API_BASE_URL;
+    delete process.env.DELPHI_API_ACCESS_KEY;
+    delete process.env.DELPHI_SUBGRAPH_URL;
+    process.env.DELPHI_API_BASE_URL = API_BASE;
+    process.env.DELPHI_API_ACCESS_KEY = API_KEY;
+
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ markets: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+    delete process.env.DELPHI_SUBGRAPH_URL;
+  });
+
+  it("sends X-Delphi-Mode: competition on API requests", async () => {
+    const client = new DelphiClient({ network: "competition-testnet" });
+    await client.listMarkets();
+
+    const [, init] = fetchSpy.mock.calls[0] as [unknown, any];
+    const headers = init?.headers as Record<string, string>;
+    expect(headers["X-Delphi-Mode"]).toBe("competition");
+    expect(headers["X-API-Key"]).toBe(API_KEY);
+  });
+
+  it("does not send X-Delphi-Mode on testnet/mainnet", async () => {
+    const client = new DelphiClient({ network: "testnet" });
+    await client.listMarkets();
+
+    const [, init] = fetchSpy.mock.calls[0] as [unknown, any];
+    expect((init?.headers as Record<string, string>)["X-Delphi-Mode"]).toBeUndefined();
+  });
+
+  it("caller-provided extraHeaders win over the derived mode header", async () => {
+    const client = new DelphiClient({
+      network: "competition-testnet",
+      extraHeaders: { "X-Delphi-Mode": "delphi" },
+    });
+    await client.listMarkets();
+
+    const [, init] = fetchSpy.mock.calls[0] as [unknown, any];
+    expect((init?.headers as Record<string, string>)["X-Delphi-Mode"]).toBe("delphi");
+  });
+
+  it("passes competitionId through listMarkets and getMarket queries", async () => {
+    const client = new DelphiClient({ network: "competition-testnet" });
+    const compId = "11111111-2222-3333-4444-555555555555";
+
+    await client.listMarkets({ competitionId: compId });
+    let [url] = fetchSpy.mock.calls[0] as [string, unknown];
+    expect(new URL(url).searchParams.get("competitionId")).toBe(compId);
+
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: "0xabc", appMarketId: "uuid-1" }), { status: 200 }),
+    );
+    await client.getMarket({ id: "0xabc", competitionId: compId });
+    [url] = fetchSpy.mock.calls[1] as [string, unknown];
+    expect(new URL(url).searchParams.get("competitionId")).toBe(compId);
+  });
+
+  it("queries the competition subgraph by default", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ data: { _meta: { block: { number: 1 } } } }), { status: 200 }),
+    );
+    const client = new DelphiClient({ network: "competition-testnet" });
+    await client.getSubgraph().getMeta();
+
+    const [url] = fetchSpy.mock.calls[0] as [string, unknown];
+    expect(url).toBe(
+      "https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-agent-competition/1.0.0/gn",
+    );
+  });
+
+  it("omits market-creator economics from getMarketSettlement (absent on the LMSR subgraph)", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          data: {
+            gatewayMarketSettleds: [{ id: "s1", marketProxy: "0xmkt", winningOutcomeIdx: "1" }],
+            gatewayMarketFaileds: [],
+            marketResolutionRequesteds: [],
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    const client = new DelphiClient({ network: "competition-testnet" });
+    const res = await client.getSubgraph().getMarketSettlement("0xmkt");
+
+    const [, init] = fetchSpy.mock.calls[0] as [unknown, any];
+    const sent = JSON.parse(init.body as string).query as string;
+    expect(sent).not.toContain("marketCreatorReward");
+    expect(sent).not.toContain("marketCreatorTradingFeesCut");
+    // Shape stays identical to delphi — absent fields surface as null, not undefined.
+    expect(res.settled[0]).toMatchObject({
+      winningOutcomeIdx: "1",
+      marketCreatorReward: null,
+      refund: null,
+      marketCreatorTradingFeesCut: null,
+    });
+  });
+
+  it("keeps market-creator economics on testnet", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          data: { gatewayMarketSettleds: [], gatewayMarketFaileds: [], marketResolutionRequesteds: [] },
+        }),
+        { status: 200 },
+      ),
+    );
+    const client = new DelphiClient({ network: "testnet" });
+    await client.getSubgraph().getMarketSettlement("0xmkt");
+
+    const [, init] = fetchSpy.mock.calls[0] as [unknown, any];
+    expect(JSON.parse(init.body as string).query).toContain("marketCreatorReward");
+  });
+
+  it("DELPHI_SUBGRAPH_URL overrides the competition subgraph default", async () => {
+    process.env.DELPHI_SUBGRAPH_URL = "https://subgraph.example.com/gn";
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ data: { _meta: { block: { number: 1 } } } }), { status: 200 }),
+    );
+    const client = new DelphiClient({ network: "competition-testnet" });
+    await client.getSubgraph().getMeta();
+
+    const [url] = fetchSpy.mock.calls[0] as [string, unknown];
+    expect(url).toBe("https://subgraph.example.com/gn");
+  });
+});

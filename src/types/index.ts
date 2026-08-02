@@ -287,6 +287,8 @@ export interface ListMarketsParams {
   category?: string;
   /** Filter by verifiable settlement */
   verifiable?: boolean;
+  /** Competition UUID to read markets from (competition networks only). When omitted, the API defaults to the active competition. */
+  competitionId?: string;
   /** When true, fetches on-chain spot prices and implied probabilities for each market's outcomes via multicall (default false) */
   pricesAndImpliedProbabilities?: boolean;
 }
@@ -298,6 +300,8 @@ export interface ListMarketsResponse {
 export interface GetMarketParams {
   /** Market ID */
   id: string;
+  /** Competition UUID to read the market from (competition networks only); a market outside it is reported as not found. When omitted, the API defaults to the active competition. */
+  competitionId?: string;
   /** When true, fetches on-chain spot prices and implied probabilities for the market's outcomes (default false) */
   pricesAndImpliedProbabilities?: boolean;
 }
@@ -423,12 +427,12 @@ export interface SubgraphMeta {
  * `"private_key"` — Sign locally with a hex private key.
  */
 export type SignerType = "private_key" | "cdp_server_wallet";
-export type Network = "testnet" | "mainnet";
+export type Network = "testnet" | "mainnet" | "competition-testnet";
 
 // ─── Client Configuration ─────────────────────────────────────────────────────
 
 export interface DelphiClientConfig {
-  /** Network to use: "testnet" or "mainnet". Default: `"testnet"`. */
+  /** Network to use: "testnet", "mainnet" or "competition-testnet". Default: `"testnet"`. */
   network?: Network;
   /** Which signing mechanism to use. Default: `"cdp_server_wallet"`. */
   signerType?: SignerType;

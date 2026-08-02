@@ -63,7 +63,7 @@ function ensureHexPrefix(value: string): string {
 /**
  * Per-network contract defaults.
  *
- * Delphi runs two parallel deployments on each network. `gatewayAddress` /
+ * Delphi runs two parallel deployments on testnet and mainnet. `gatewayAddress` /
  * `factoryAddress` are the automated-settlement deployment (oracle-settled, where
  * every new market is created); `legacyGatewayAddress` / `legacyFactoryAddress` are
  * the original creator-settled deployment, whose factory is frozen but whose
@@ -76,6 +76,10 @@ function ensureHexPrefix(value: string): string {
  * `subgraphUrl` indexes the automated-settlement gateway only. Legacy-gateway
  * activity lives in the older `delphi-testnet`/`delphi-mainnet` subgraphs; set
  * `subgraphUrl` explicitly to query those.
+ *
+ * `competition-testnet` is the exception: a single oracle-settled deployment
+ * with no legacy counterpart, so its legacy addresses are unset and routing is
+ * a no-op.
  */
 const NETWORK_DEFAULTS: Record<Network, Partial<DelphiClientConfig>> = {
   testnet: {
@@ -104,6 +108,27 @@ const NETWORK_DEFAULTS: Record<Network, Partial<DelphiClientConfig>> = {
       "https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-mainnet-autoset/1.0.0/gn",
     delphiAppUrl: "https://app.delphi.fyi"
   },
+  // The agent trading competition runs on the same chain as testnet but with
+  // its own LMSR contracts (same gateway call signatures). The REST API is the
+  // same testnet deployment; competition data is selected per request via the
+  // X-Delphi-Mode header, which the client sends automatically for this
+  // network. The competition has its own Goldsky subgraph indexing the LMSR
+  // gateway from its deployment block (21525320).
+  //
+  // Unlike testnet/mainnet this is a single, oracle-settled deployment: there is
+  // no legacy competition gateway, so the legacy addresses are deliberately
+  // unset and resolveGateway() short-circuits every market to this gateway.
+  "competition-testnet": {
+    rpcUrl: "https://gensyn-testnet.g.alchemy.com/public",
+    chainId: 685685,
+    gatewayAddress: "0x097599c9D966fF496284b892A8F13BF885b258ef" as `0x${string}`,
+    factoryAddress: "0xEa9D0a78d0209916e88e363B8FDa3e23206Ff49b" as `0x${string}`,
+    tokenAddress: "0x8A2d75753362Eb5D5669a2c22cbf394b26a0571F" as `0x${string}`,
+    apiBaseUrl: "https://delphi-api.gensyn.ai/",
+    subgraphUrl:
+      "https://api.goldsky.com/api/public/project_cmnoqdag1obop01z3efnu8ssq/subgraphs/delphi-agent-competition/1.0.0/gn",
+    delphiAppUrl: "https://agent-competition.gensyn.ai"
+  },
 };
 
 /**
@@ -114,9 +139,13 @@ const NETWORK_DEFAULTS: Record<Network, Partial<DelphiClientConfig>> = {
  *
  * ## Network Configuration
  *
- * The client supports two networks: `"testnet"` (default) and `"mainnet"`.
- * Network-specific defaults are applied automatically, but can be overridden
- * via config or environment variables.
+ * The client supports three networks: `"testnet"` (default), `"mainnet"` and
+ * `"competition-testnet"` (the agent trading competition — same chain as
+ * testnet, its own contracts and subgraph, and competition-scoped market data
+ * selected via the X-Delphi-Mode header the client sends automatically).
+ * Network-specific
+ * defaults are applied automatically, but can be overridden via config or
+ * environment variables.
  *
  * ## Signing mechanisms
  *
@@ -156,6 +185,9 @@ export class DelphiClient {
 
   // Subgraph config
   private readonly subgraphUrl?: string;
+
+  /** Competition networks differ from delphi in a few request/response details. */
+  private readonly isCompetitionNetwork: boolean;
 
   // Delphi app URL
   private readonly delphiAppUrl?: string;
@@ -225,8 +257,15 @@ export class DelphiClient {
     // Delphi app URL (use network defaults, allow env/config override)
     this.delphiAppUrl = config?.delphiAppUrl ?? process.env.DELPHI_APP_URL ?? networkDefaults.delphiAppUrl;
 
-    // Extra headers (e.g. Cloudflare Access)
-    this.extraHeaders = config?.extraHeaders ?? {};
+    this.isCompetitionNetwork = network.startsWith("competition");
+
+    // Extra headers (e.g. Cloudflare Access). Competition networks share the
+    // delphi REST API deployment and select competition data per request via
+    // X-Delphi-Mode; caller-provided headers win over the derived default.
+    const modeHeaders: Record<string, string> = this.isCompetitionNetwork
+      ? { "X-Delphi-Mode": "competition" }
+      : {};
+    this.extraHeaders = { ...modeHeaders, ...config?.extraHeaders };
   }
 
   // ─── Signer ─────────────────────────────────────────────────────────────────
@@ -744,7 +783,11 @@ export class DelphiClient {
    */
   getSubgraph(): SubgraphClient {
     if (!this.subgraphClient) {
-      this.subgraphClient = new SubgraphClient(this.getSubgraphUrl());
+      // The competition's LMSR gateway emits a narrower MarketSettled than the
+      // delphi gateway, so its subgraph has no market-creator economics fields.
+      this.subgraphClient = new SubgraphClient(this.getSubgraphUrl(), {
+        settlementEconomics: !this.isCompetitionNetwork,
+      });
     }
     return this.subgraphClient;
   }
@@ -919,6 +962,7 @@ export class DelphiClient {
       status: params.status,
       category: params.category,
       verifiable: params.verifiable,
+      competitionId: params.competitionId,
     });
 
     const markets = response.markets?.map((m) => ({ ...m, marketUrl: this.buildMarketUrl(m.appMarketId) })) ?? null;
@@ -941,7 +985,9 @@ export class DelphiClient {
    * Retrieve a single market by ID.
    */
   async getMarket(params: GetMarketParams): Promise<GetMarketResponse> {
-    const market = await this.apiGet<GetMarketResponse>(`/markets/${encodeURIComponent(params.id)}`);
+    const market = await this.apiGet<GetMarketResponse>(`/markets/${encodeURIComponent(params.id)}`, {
+      competitionId: params.competitionId,
+    });
     const enriched = { ...market, marketUrl: this.buildMarketUrl(market.appMarketId) };
 
     if (params.pricesAndImpliedProbabilities) {
