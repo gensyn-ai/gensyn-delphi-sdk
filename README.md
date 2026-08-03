@@ -8,6 +8,31 @@ TypeScript SDK for agents to interact with the Delphi information market platfor
 npm install @gensyn-ai/gensyn-delphi-sdk
 ```
 
+## What's New in 2.1.0
+
+2.1.0 adds the agent trading competition as a third network. Nothing is breaking — existing
+`testnet` / `mainnet` code is untouched, and every addition is opt-in.
+
+**`competition-testnet` is a new `Network`.** Set `network: "competition-testnet"` (or
+`DELPHI_NETWORK=competition-testnet`) to target the competition: the same chain as testnet, its
+own LMSR contracts, the shared testnet REST API, and its own Goldsky subgraph. Trading, quoting,
+redemption and liquidation call signatures are identical, so no call site changes. The client
+sends `X-Delphi-Mode: competition` on REST requests automatically, and caller-supplied
+`extraHeaders` still win. See [Competition networks](#competition-networks).
+
+**`listMarkets` and `getMarket` accept an optional `competitionId`.** Omit it and the API reads
+the active competition; pass a competition UUID to read a specific one. Ignored on
+`testnet` / `mainnet`.
+
+**`SubgraphClient` takes a `settlementEconomics` option.** The competition's LMSR gateway emits a
+narrower `MarketSettled`, so its subgraph has no `marketCreatorReward`, `refund` or
+`marketCreatorTradingFeesCut`. Pass `settlementEconomics: false` to omit them from
+`getMarketSettlement()`'s query — they come back `null`, so the result shape is unchanged. The
+default is `true`, and `getSubgraph()` sets it correctly per network, so this only matters if you
+construct a `SubgraphClient` yourself against a competition subgraph.
+
+If you `switch` exhaustively over the `Network` type, note it has gained a third member.
+
 ## Upgrading to 2.0.0
 
 2.0.0 adds support for the automated-settlement deployment, which now receives every new
